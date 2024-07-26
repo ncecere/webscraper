@@ -138,13 +138,50 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 		return
 	}
 
-	// Remove images
-	document.Find("img").Remove()
+	// Extract the page title
+	pageTitle := document.Find("title").Text()
 
-	// Remove menus (this is a basic example, you might need to adjust selectors based on the specific website structure)
-	document.Find("nav, .menu, .navigation, header, footer").Remove()
+	// Remove common navigation elements and menus
+	document.Find("nav, .nav, .navbar, .menu, .navigation, header, footer, .sidebar, #sidebar, .skip-link, .skip-to-content").Remove()
 
-	content, err := document.Find("body").Html()
+	// Remove elements with role="navigation"
+	document.Find("[role='navigation']").Remove()
+
+	// Remove elements with aria-label containing "navigation" or "menu"
+	document.Find("[aria-label]").Each(func(i int, s *goquery.Selection) {
+		if ariaLabel, exists := s.Attr("aria-label"); exists {
+			if strings.Contains(strings.ToLower(ariaLabel), "navigation") || strings.Contains(strings.ToLower(ariaLabel), "menu") {
+				s.Remove()
+			}
+		}
+	})
+
+	// Remove "Skip to main content" links
+	document.Find("a").Each(func(i int, s *goquery.Selection) {
+		if href, exists := s.Attr("href"); exists && strings.Contains(href, "#content") {
+			s.Remove()
+		}
+	})
+
+	// Convert headings to make them subordinate to the page title
+	document.Find("h1").Each(func(i int, s *goquery.Selection) {
+		s.SetAttr("class", "h2")
+	})
+	document.Find("h2").Each(func(i int, s *goquery.Selection) {
+		s.SetAttr("class", "h3")
+	})
+	document.Find("h3, h4, h5, h6").Each(func(i int, s *goquery.Selection) {
+		s.SetAttr("class", "h4")
+	})
+
+	// Find the main content
+	mainContent := document.Find("main, #main, .main, [role='main']")
+	if mainContent.Length() == 0 {
+		// If no main content found, use the body
+		mainContent = document.Find("body")
+	}
+
+	content, err := mainContent.Html()
 	if err != nil {
 		log.Printf("Error extracting content from %s: %v\n", urlStr, err)
 		return
@@ -160,11 +197,58 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 		},
 	})
 
+	// Add custom rules for headings
+	converter.AddRules(md.Rule{
+		Filter: []string{"h1", "h2", "h3", "h4", "h5", "h6"},
+		Replacement: func(content string, selec *goquery.Selection, options *md.Options) *string {
+			class, _ := selec.Attr("class")
+			level := 2 // default to h2
+			switch class {
+			case "h2":
+				level = 2
+			case "h3":
+				level = 3
+			case "h4":
+				level = 4
+			}
+			return md.String(strings.Repeat("#", level) + " " + content)
+		},
+	})
+
 	markdown, err := converter.ConvertString(content)
 	if err != nil {
 		log.Printf("Error converting to markdown for %s: %v\n", urlStr, err)
 		return
 	}
+
+	// Improve markdown structure
+	lines := strings.Split(markdown, "\n")
+	var improvedLines []string
+	var toc []string
+	inCodeBlock := false
+
+	improvedLines = append(improvedLines, "# "+pageTitle+"\n")
+	improvedLines = append(improvedLines, "## Table of Contents\n")
+
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmedLine, "```") {
+			inCodeBlock = !inCodeBlock
+		}
+		if !inCodeBlock && (strings.HasPrefix(trimmedLine, "## ") || strings.HasPrefix(trimmedLine, "### ") || strings.HasPrefix(trimmedLine, "#### ")) {
+			tocEntry := strings.TrimLeft(trimmedLine, "# ")
+			toc = append(toc, "- ["+tocEntry+"](#"+utils.SanitizeAnchor(tocEntry)+")")
+		}
+		if trimmedLine != "" || inCodeBlock {
+			improvedLines = append(improvedLines, line)
+		}
+	}
+
+	// Insert table of contents
+	improvedMarkdown := strings.Join(improvedLines[:2], "\n") + "\n" + strings.Join(toc, "\n") + "\n\n---\n\n" + strings.Join(improvedLines[2:], "\n")
+
+	// Add timestamp and URL at the bottom
+	improvedMarkdown += fmt.Sprintf("\n\n---\n\nScraped from [%s](%s) on %s", urlStr, urlStr, time.Now().Format(time.RFC3339))
 
 	// Create directory for the domain
 	u, _ := url.Parse(urlWithoutFragment)
@@ -178,7 +262,7 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 	// Use URL without fragment for file naming
 	filename := utils.SanitizeFilename(urlWithoutFragment) + ".md"
 	filePath := filepath.Join(domainDir, filename)
-	err = os.WriteFile(filePath, []byte(markdown), 0644)
+	err = os.WriteFile(filePath, []byte(improvedMarkdown), 0644)
 	if err != nil {
 		log.Printf("Error writing file for %s: %v\n", urlWithoutFragment, err)
 		return

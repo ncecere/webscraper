@@ -36,3 +36,15 @@ func SanitizeFilename(filename string) string {
 	reg := regexp.MustCompile(`[^a-zA-Z0-9-_.]`)
 	return reg.ReplaceAllString(filename, "_")
 }
+
+// SanitizeAnchor creates a valid anchor from a string
+func SanitizeAnchor(s string) string {
+	// Convert to lowercase
+	s = strings.ToLower(s)
+	// Replace spaces with hyphens
+	s = strings.ReplaceAll(s, " ", "-")
+	// Remove any character that is not alphanumeric or hyphen
+	reg := regexp.MustCompile(`[^a-z0-9-]`)
+	s = reg.ReplaceAllString(s, "")
+	return s
+}
