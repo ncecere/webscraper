@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,13 +21,18 @@ import (
 )
 
 var (
-	visitedURLs   sync.Map
-	wg            sync.WaitGroup
-	semaphore     chan struct{}
-	externalLinks sync.Map
+	visitedURLs      sync.Map
+	wg               sync.WaitGroup
+	semaphore        chan struct{}
+	externalLinks    sync.Map
+	documentsCreated int
+	urlsScanned      int
+	mutex            sync.Mutex
 )
 
 func Run() {
+	startTime := time.Now()
+
 	startURL := viper.GetString("start_url")
 	if startURL == "" {
 		fmt.Println("Please provide a start URL using --start-url flag or in the config file")
@@ -74,7 +80,12 @@ func Run() {
 	// Write external links to file
 	writeExternalLinksFile(outputPath)
 
+	elapsedTime := time.Since(startTime)
+
 	fmt.Println("Scraping completed")
+	fmt.Printf("Documents created: %d\n", documentsCreated)
+	fmt.Printf("URLs scanned: %d\n", urlsScanned)
+	fmt.Printf("Total time: %s\n", elapsedTime)
 }
 
 func scrape(ctx context.Context, urlStr string, outputPath string, depth int, baseURL *url.URL, isInternal bool) {
@@ -97,6 +108,11 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 	}
 
 	fmt.Printf("Scraping: %s (depth: %d)\n", urlStr, depth)
+
+	// Increment URLs scanned counter
+	mutex.Lock()
+	urlsScanned++
+	mutex.Unlock()
 
 	// Create a context with a timeout
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -122,6 +138,12 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 		return
 	}
 
+	// Remove images
+	document.Find("img").Remove()
+
+	// Remove menus (this is a basic example, you might need to adjust selectors based on the specific website structure)
+	document.Find("nav, .menu, .navigation, header, footer").Remove()
+
 	content, err := document.Find("body").Html()
 	if err != nil {
 		log.Printf("Error extracting content from %s: %v\n", urlStr, err)
@@ -129,6 +151,15 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 	}
 
 	converter := md.NewConverter("", true, nil)
+
+	// Configure the converter to skip converting images
+	converter.AddRules(md.Rule{
+		Filter: []string{"img"},
+		Replacement: func(content string, selec *goquery.Selection, options *md.Options) *string {
+			return md.String("")
+		},
+	})
+
 	markdown, err := converter.ConvertString(content)
 	if err != nil {
 		log.Printf("Error converting to markdown for %s: %v\n", urlStr, err)
@@ -153,6 +184,11 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 		return
 	}
 
+	// Increment documents created counter
+	mutex.Lock()
+	documentsCreated++
+	mutex.Unlock()
+
 	// Mark the URL (without fragment) as visited
 	visitedURLs.Store(urlWithoutFragment, true)
 
@@ -164,6 +200,11 @@ func scrape(ctx context.Context, urlStr string, outputPath string, depth int, ba
 		document.Find("a").Each(func(i int, s *goquery.Selection) {
 			href, exists := s.Attr("href")
 			if exists {
+				// Skip mailto and tel links
+				if strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") {
+					return
+				}
+
 				absoluteURL := utils.ToAbsoluteURL(href, baseURL)
 				if absoluteURL != "" {
 					parsedURL, _ := url.Parse(absoluteURL)
